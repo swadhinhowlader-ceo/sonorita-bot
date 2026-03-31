@@ -2,34 +2,13 @@ services:
   - type: web
     name: sonorita-bot
     runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn bot:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    plan: free
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: gunicorn bot:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.7
       - key: TELEGRAM_BOT_TOKEN
         value: 8652318426:AAHug3Gjns1JMRDMQ9hg6VHQsMBMbKVbwDk
-      - key: WEBHOOK_URL
-        sync: false  # Set after deploy
-      - key: OPENROUTER_KEY_1
-        sync: false
-      - key: OPENROUTER_KEY_2
-        sync: false
-      - key: OPENROUTER_KEY_3
-        sync: false
-      - key: OPENROUTER_KEY_4
-        sync: false
-      - key: GROQ_KEY_1
-        sync: false
-      - key: GROQ_KEY_2
-        sync: false
-      - key: GROQ_KEY_3
-        sync: false
-      - key: GROQ_KEY_4
-        sync: false
-      - key: OPENAI_KEY
-        sync: false
-      - key: GEMINI_KEY
-        sync: false
-      - key: HUGGINGFACE_KEY
-        sync: false
       - key: PORT
         value: 8080

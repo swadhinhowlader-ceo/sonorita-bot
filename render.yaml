@@ -2,9 +2,8 @@ services:
   - type: web
     name: sonorita-bot
     runtime: python
-    plan: free
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: python app.py
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 app.py
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
-        value: 8652318426:AAHug3Gjns1JMRDMQ9hg6VHQsMBMbKVbwDk
+      - key: PYTHON_VERSION
+        value: 3.11.9

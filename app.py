@@ -188,3 +188,15 @@ def debug():
         "port": os.environ.get("PORT"),
         "webhook_url": os.environ.get("WEBHOOK_URL"),
     })
+
+# Self-ping to stay alive (every 10 min)
+import threading
+def self_ping():
+    while True:
+        time.sleep(600)  # 10 min
+        try:
+            requests.get("https://sonorita-bot.onrender.com/health", timeout=10)
+            print("🏓 Self-ping ok")
+        except: pass
+
+threading.Thread(target=self_ping, daemon=True).start()

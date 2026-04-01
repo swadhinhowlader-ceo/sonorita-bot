@@ -1,598 +1,175 @@
 """
-Sonorita AI Telegram Bot
+Sonorita AI Telegram Bot - CLEAN VERSION
 Multi-API fallback: OpenRouter → Groq → OpenAI → Gemini → HuggingFace
-Features: Research, Reminders, Skills, Web Interface
 """
-import os
-import json
-import time
-import sqlite3
-import threading
-import requests
-import re
+import os, json, time, sqlite3, threading, requests, re
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify
 
-# ═══════════════════════════════════════════
-# CONFIGURATION
-# ═══════════════════════════════════════════
+# ═══ CONFIG ═══
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8652318426:AAHug3Gjns1JMRDMQ9hg6VHQsMBMbKVbwDk")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8652318426:AAHug3Gjns1JMRDMQ9hg6VHQsMBMbKVbwDk")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
-
-# API Keys (multiple per provider for fallback)
 API_KEYS = {
-    "openrouter": [
-        os.getenv("OPENROUTER_KEY_1", ""),
-        os.getenv("OPENROUTER_KEY_2", ""),
-        os.getenv("OPENROUTER_KEY_3", ""),
-        os.getenv("OPENROUTER_KEY_4", ""),
-    ],
-    "groq": [
-        os.getenv("GROQ_KEY_1", ""),
-        os.getenv("GROQ_KEY_2", ""),
-        os.getenv("GROQ_KEY_3", ""),
-        os.getenv("GROQ_KEY_4", ""),
-    ],
-    "openai": [os.getenv("OPENAI_KEY", "")],
-    "gemini": [os.getenv("GEMINI_KEY", "")],
-    "huggingface": [os.getenv("HUGGINGFACE_KEY", "")],
+    "openrouter": [os.environ.get(f"OPENROUTER_KEY_{i}", "") for i in range(1,5)],
+    "groq": [os.environ.get(f"GROQ_KEY_{i}", "") for i in range(1,5)],
+    "openai": [os.environ.get("OPENAI_KEY", "")],
+    "gemini": [os.environ.get("GEMINI_KEY", "")],
+    "huggingface": [os.environ.get("HUGGINGFACE_KEY", "")],
 }
 
-# API Endpoints & Models
-API_CONFIG = {
-    "openrouter": {
-        "url": "https://openrouter.ai/api/v1/chat/completions",
-        "model": "anthropic/claude-3.5-sonnet",
-        "headers": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-    },
-    "groq": {
-        "url": "https://api.groq.com/openai/v1/chat/completions",
-        "model": "llama3-70b-8192",
-        "headers": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-    },
-    "openai": {
-        "url": "https://api.openai.com/v1/chat/completions",
-        "model": "gpt-4o-mini",
-        "headers": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-    },
-    "gemini": {
-        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
-        "model": "gemini-1.5-flash",
-        "headers": lambda key: {"Content-Type": "application/json"},
-    },
-    "huggingface": {
-        "url": "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
-        "model": "mistral-7b",
-        "headers": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-    },
-}
+SYSTEM_PROMPT = "You are Sonorita, a helpful AI assistant by Swadhin. Reply in Bengali or English."
 
-PROVIDER_ORDER = ["openrouter", "groq", "openai", "gemini", "huggingface"]
-
-SYSTEM_PROMPT = """You are Sonorita, a helpful, friendly AI assistant created by Swadhin.
-You can speak both Bengali (Bangla) and English. Reply in the same language the user uses.
-Be concise, helpful, and engaging. You can do research, answer questions, help with code,
-write documents, set reminders, and much more. You are always learning and improving."""
-
-# ═══════════════════════════════════════════
-# DATABASE
-# ═══════════════════════════════════════════
-
-DB_PATH = "sonorita.db"
-
+# ═══ DATABASE ═══
+DB = "sonorita.db"
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
-    
-    # Conversations
-    c.execute("""CREATE TABLE IF NOT EXISTS conversations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        role TEXT,
-        content TEXT,
-        timestamp REAL
-    )""")
-    
-    # Reminders
-    c.execute("""CREATE TABLE IF NOT EXISTS reminders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        message TEXT,
-        remind_at REAL,
-        chat_id INTEGER,
-        is_sent INTEGER DEFAULT 0
-    )""")
-    
-    # User preferences
-    c.execute("""CREATE TABLE IF NOT EXISTS user_prefs (
-        user_id INTEGER,
-        key TEXT,
-        value TEXT,
-        PRIMARY KEY (user_id, key)
-    )""")
-    
-    # Skills
-    c.execute("""CREATE TABLE IF NOT EXISTS skills (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE,
-        description TEXT,
-        code TEXT,
-        is_active INTEGER DEFAULT 1
-    )""")
-    
+    c.execute("CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY, user_id INTEGER, role TEXT, content TEXT, ts REAL)")
+    c.execute("CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY, user_id INTEGER, message TEXT, remind_at REAL, chat_id INTEGER, is_sent INTEGER DEFAULT 0)")
+    c.execute("CREATE TABLE IF NOT EXISTS skills (id INTEGER PRIMARY KEY, name TEXT UNIQUE, description TEXT, code TEXT, active INTEGER DEFAULT 1)")
     conn.commit()
     conn.close()
 
-def db_execute(query, params=()):
-    conn = sqlite3.connect(DB_PATH)
+def db(query, params=()):
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute(query, params)
     conn.commit()
-    result = c.fetchall()
+    r = c.fetchall()
     conn.close()
-    return result
-
-def db_fetch(query, params=()):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(query, params)
-    result = c.fetchall()
-    conn.close()
-    return result
+    return r
 
 init_db()
 
-# ═══════════════════════════════════════════
-# AI ENGINE (Multi-API Fallback)
-# ═══════════════════════════════════════════
-
-def call_ai(prompt, user_id=None, conversation_history=None):
-    """Call AI with fallback. Tries each provider until one succeeds."""
-    
-    # Build messages
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    
-    # Add conversation history
+# ═══ AI ENGINE ═══
+def call_ai(prompt, user_id=None):
+    messages = [{"role":"system","content":SYSTEM_PROMPT}]
     if user_id:
-        history = db_fetch(
-            "SELECT role, content FROM conversations WHERE user_id = ? ORDER BY timestamp DESC LIMIT 20",
-            (user_id,)
-        )
-        for role, content in reversed(history):
-            messages.append({"role": role, "content": content})
-    
-    messages.append({"role": "user", "content": prompt})
-    
-    # Try each provider
-    for provider in PROVIDER_ORDER:
-        config = API_CONFIG[provider]
-        keys = [k for k in API_KEYS[provider] if k]  # Filter empty keys
-        
+        for role, content in reversed(db("SELECT role,content FROM conversations WHERE user_id=? ORDER BY ts DESC LIMIT 20",(user_id,))):
+            messages.append({"role":role,"content":content})
+    messages.append({"role":"user","content":prompt})
+
+    providers = [
+        ("openrouter","https://openrouter.ai/api/v1/chat/completions","anthropic/claude-3.5-sonnet"),
+        ("groq","https://api.groq.com/openai/v1/chat/completions","llama3-70b-8192"),
+        ("openai","https://api.openai.com/v1/chat/completions","gpt-4o-mini"),
+        ("gemini",None,None),
+        ("huggingface","https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",None),
+    ]
+
+    for prov, url, model in providers:
+        keys = [k for k in API_KEYS[prov] if k]
         for key in keys:
             try:
-                response = _call_provider(provider, config, key, messages)
-                if response:
-                    # Save to history
-                    if user_id:
-                        db_execute(
-                            "INSERT INTO conversations (user_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-                            (user_id, "user", prompt, time.time())
-                        )
-                        db_execute(
-                            "INSERT INTO conversations (user_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-                            (user_id, "assistant", response, time.time())
-                        )
-                    return response
+                if prov == "gemini":
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
+                    contents = [{"role":"user","parts":[{"text":m["content"]}]} for m in messages]
+                    body = json.dumps({"contents":contents,"generationConfig":{"maxOutputTokens":4096}})
+                    r = requests.post(url,headers={"Content-Type":"application/json"},data=body,timeout=60)
+                    r.raise_for_status()
+                    resp = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                else:
+                    body = json.dumps({"model":model,"messages":messages,"max_tokens":4096})
+                    h = {"Authorization":f"Bearer {key}","Content-Type":"application/json"}
+                    r = requests.post(url,headers=h,data=body,timeout=60)
+                    r.raise_for_status()
+                    resp = r.json()["choices"][0]["message"]["content"]
+
+                if user_id:
+                    db("INSERT INTO conversations (user_id,role,content,ts) VALUES (?,?,?,?)",(user_id,"user",prompt,time.time()))
+                    db("INSERT INTO conversations (user_id,role,content,ts) VALUES (?,?,?,?)",(user_id,"assistant",resp,time.time()))
+                return resp
             except Exception as e:
-                print(f"[{provider}] Error: {e}")
-                continue  # Try next key
-    
-    return "⚠️ Shob AI providers fail hoyeche. API keys check koro."
+                print(f"[{prov}] {e}")
+                continue
+    return "⚠️ All AI providers failed. Check API keys."
 
-def _call_provider(provider, config, key, messages):
-    """Call a specific AI provider."""
-    headers = config["headers"](key)
-    
-    if provider == "gemini":
-        # Gemini has different format
-        contents = []
-        for msg in messages:
-            if msg["role"] == "system":
-                contents.append({"role": "user", "parts": [{"text": msg["content"]}]})
-            else:
-                contents.append({"role": msg["role"], "parts": [{"text": msg["content"]}]})
-        
-        body = json.dumps({
-            "contents": contents,
-            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 4096}
-        })
-        url = f"{config['url']}?key={key}"
-    else:
-        body = json.dumps({
-            "model": config["model"],
-            "messages": messages,
-            "max_tokens": 4096,
-            "temperature": 0.7
-        })
-        url = config["url"]
-    
-    resp = requests.post(url, headers=headers, data=body, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    
-    # Parse response
-    if provider == "gemini":
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-    elif provider == "huggingface":
-        return data[0]["generated_text"][-1]["content"] if isinstance(data, list) else data.get("generated_text", "")
-    else:
-        return data["choices"][0]["message"]["content"]
-
-# ═══════════════════════════════════════════
-# WEB SEARCH (Research)
-# ═══════════════════════════════════════════
-
-def web_search(query):
-    """Search the web using DuckDuckGo."""
-    try:
-        url = f"https://api.duckduckgo.com/?q={query}&format=json&no_html=1&skip_disambig=1"
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        
-        results = []
-        if data.get("Abstract"):
-            results.append(data["Abstract"])
-        for topic in data.get("RelatedTopics", [])[:5]:
-            if isinstance(topic, dict) and topic.get("Text"):
-                results.append(topic["Text"])
-        
-        return "\n".join(results) if results else "Search results pai ni."
-    except Exception as e:
-        return f"Search error: {e}"
-
-def research_topic(topic):
-    """Deep research: search + summarize."""
-    search_results = web_search(topic)
-    
-    # Ask AI to summarize
-    prompt = f"""Research results for "{topic}":
-
-{search_results}
-
-Based on these results, provide a comprehensive, well-organized summary. 
-Include key facts, insights, and conclusions. Reply in the same language the topic is written in."""
-    
-    return call_ai(prompt)
-
-# ═══════════════════════════════════════════
-# REMINDER SYSTEM
-# ═══════════════════════════════════════════
-
+# ═══ REMINDERS ═══
 def parse_reminder(text):
-    """Parse reminder from text like '10 minute pore reminder dao'."""
     patterns = [
-        (r'(\d+)\s*(minute|min|মিনিট)', 'minutes'),
-        (r'(\d+)\s*(hour|ghonta|ঘণ্টা)', 'hours'),
-        (r'(\d+)\s*(day|din|দিন)', 'days'),
-        (r'(\d+)\s*(second|sec|সেকেন্ড)', 'seconds'),
+        (r'(\d+)\s*(minute|min|মিনিট)','minutes'),
+        (r'(\d+)\s*(hour|ghonta|ঘণ্টা)','hours'),
+        (r'(\d+)\s*(day|din|দিন)','days'),
     ]
-    
-    for pattern, unit in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            amount = int(match.group(1))
-            reminder_text = re.sub(pattern, '', text, flags=re.IGNORECASE)
-            reminder_text = re.sub(r'remind|reminder|dao|dibo|mone koro', '', reminder_text, flags=re.IGNORECASE).strip()
-            
-            if not reminder_text:
-                reminder_text = f"{amount} {unit} reminder"
-            
-            delta = timedelta()
-            if unit == 'minutes':
-                delta = timedelta(minutes=amount)
-            elif unit == 'hours':
-                delta = timedelta(hours=amount)
-            elif unit == 'days':
-                delta = timedelta(days=amount)
-            elif unit == 'seconds':
-                delta = timedelta(seconds=amount)
-            
-            return {
-                "time": datetime.now() + delta,
-                "message": reminder_text,
-                "amount": amount,
-                "unit": unit
-            }
-    
+    for pat, unit in patterns:
+        m = re.search(pat, text, re.I)
+        if m:
+            n = int(m.group(1))
+            msg = re.sub(pat,'',text,flags=re.I)
+            msg = re.sub(r'remind|reminder|dao|dibo','',msg,flags=re.I).strip() or f"{n} {unit} reminder"
+            d = timedelta(**{unit:n})
+            return {"time":datetime.now()+d,"message":msg,"amount":n,"unit":unit}
     return None
 
-def set_reminder(user_id, chat_id, text):
-    """Set a reminder."""
-    parsed = parse_reminder(text)
-    if not parsed:
-        return "⏰ Reminder set korte parlam na. Example: '10 minute pore reminder dao'"
-    
-    remind_at = parsed["time"].timestamp()
-    db_execute(
-        "INSERT INTO reminders (user_id, message, remind_at, chat_id) VALUES (?, ?, ?, ?)",
-        (user_id, parsed["message"], remind_at, chat_id)
-    )
-    
-    return f"⏰ Reminder set! {parsed['amount']} {parsed['unit']} pore: \"{parsed['message']}\""
+def set_reminder(uid, cid, text):
+    p = parse_reminder(text)
+    if not p: return "⏰ Format: '10 minute pore reminder dao'"
+    db("INSERT INTO reminders (user_id,message,remind_at,chat_id) VALUES (?,?,?,?)",(uid,p["message"],p["time"].timestamp(),cid))
+    return f"⏰ {p['amount']} {p['unit']} pore reminder: \"{p['message']}\""
 
-def check_reminders(bot_url):
-    """Check and send due reminders. Called by cron."""
+def check_reminders():
     now = time.time()
-    due = db_fetch(
-        "SELECT id, user_id, message, chat_id FROM reminders WHERE remind_at <= ? AND is_sent = 0",
-        (now,)
-    )
-    
-    for rem_id, user_id, message, chat_id in due:
-        # Send reminder via Telegram
+    for rid, uid, msg, cid in db("SELECT id,user_id,message,chat_id FROM reminders WHERE remind_at<=? AND is_sent=0",(now,)):
         try:
-            url = f"{bot_url}/sendMessage"
-            requests.post(url, json={
-                "chat_id": chat_id,
-                "text": f"⏰ REMINDER: {message}"
-            }, timeout=10)
-            db_execute("UPDATE reminders SET is_sent = 1 WHERE id = ?", (rem_id,))
-        except Exception as e:
-            print(f"Reminder send error: {e}")
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",json={"chat_id":cid,"text":f"⏰ REMINDER: {msg}"},timeout=10)
+            db("UPDATE reminders SET is_sent=1 WHERE id=?",(rid,))
+        except: pass
 
-# ═══════════════════════════════════════════
-# SKILLS SYSTEM
-# ═══════════════════════════════════════════
+# ═══ COMMANDS ═══
+def handle(text, uid, cid):
+    low = text.lower()
+    if any(w in low for w in ['remind','reminder','মিনিট পর']):
+        return set_reminder(uid, cid, text)
+    if low.startswith('research ') or low.startswith('search '):
+        q = text.split(' ',1)[1]
+        try:
+            r = requests.get(f"https://api.duckduckgo.com/?q={q}&format=json",timeout=10).json()
+            results = [r.get("Abstract","")] + [t.get("Text","") for t in r.get("RelatedTopics",[])[:5] if isinstance(t,dict)]
+            search_text = "\n".join([x for x in results if x])
+            return call_ai(f"Research on '{q}':\n{search_text}\nSummarize this.", uid) if search_text else "No results found."
+        except: return "Search error."
+    if low in ['help','সাহায্য','/help','/start']:
+        return "🤖 Sonorita Bot\n\nJust chat = AI responds\nresearch [topic] = deep research\n10 minute pore reminder dao = set reminder\n\nBengali + English supported!"
+    return None
 
-def add_skill(name, description, code):
-    """Add a new skill."""
-    try:
-        db_execute(
-            "INSERT OR REPLACE INTO skills (name, description, code, is_active) VALUES (?, ?, ?, 1)",
-            (name, description, code)
-        )
-        return f"🧩 Skill '{name}' added!"
-    except Exception as e:
-        return f"Skill add error: {e}"
-
-def list_skills():
-    """List all skills."""
-    skills = db_fetch("SELECT name, description, is_active FROM skills")
-    if not skills:
-        return "No skills installed."
-    
-    result = "🧩 Installed Skills:\n"
-    for name, desc, active in skills:
-        status = "🟢" if active else "🔴"
-        result += f"{status} {name}: {desc}\n"
-    return result
-
-def execute_skill(name, input_text):
-    """Execute a skill."""
-    skill = db_fetch("SELECT code FROM skills WHERE name = ? AND is_active = 1", (name,))
-    if not skill:
-        return f"Skill '{name}' not found or inactive."
-    
-    try:
-        # Safe execution (sandboxed)
-        local_vars = {"input": input_text, "result": ""}
-        exec(skill[0][0], {"__builtins__": {}}, local_vars)
-        return local_vars.get("result", "Skill executed but no result.")
-    except Exception as e:
-        return f"Skill execution error: {e}"
-
-# ═══════════════════════════════════════════
-# DOCUMENT GENERATION
-# ═══════════════════════════════════════════
-
-def generate_document(doc_type, topic):
-    """Generate various types of documents."""
-    prompts = {
-        "report": f"Write a detailed report on: {topic}. Include introduction, findings, analysis, and conclusion.",
-        "essay": f"Write a well-structured essay on: {topic}. Include introduction, body paragraphs, and conclusion.",
-        "summary": f"Write a concise summary of: {topic}. Key points only.",
-        "letter": f"Write a professional letter about: {topic}.",
-        "email": f"Write a professional email about: {topic}.",
-        "code": f"Write production-ready code for: {topic}. Include comments.",
-        "plan": f"Create a detailed project plan for: {topic}. Include milestones, tasks, and timeline.",
-    }
-    
-    prompt = prompts.get(doc_type, f"Write a document about: {topic}")
-    return call_ai(prompt)
-
-# ═══════════════════════════════════════════
-# COMMAND HANDLER
-# ═══════════════════════════════════════════
-
-def handle_command(text, user_id, chat_id):
-    """Handle bot commands."""
-    lower = text.lower().strip()
-    
-    # Reminder
-    if any(word in lower for word in ['remind', 'reminder', 'মনে করিয়ে দাও', 'মিনিট পর']):
-        return set_reminder(user_id, chat_id, text)
-    
-    # Research
-    if lower.startswith('research ') or lower.startswith('খোঁজো ') or lower.startswith('বিস্তারিত '):
-        topic = text.split(' ', 1)[1] if ' ' in text else text
-        return research_topic(topic)
-    
-    # Document generation
-    if lower.startswith('doc ') or lower.startswith('লেখো '):
-        parts = text.split(' ', 2)
-        if len(parts) >= 3:
-            doc_type = parts[1]
-            topic = parts[2]
-            return generate_document(doc_type, topic)
-        return "📝 Usage: doc [type] [topic]. Types: report, essay, summary, letter, email, code, plan"
-    
-    # Skills
-    if lower.startswith('skill add '):
-        return "🧩 Skill adding: Use web interface or send code."
-    if lower == 'skills' or lower == 'শিল্প':
-        return list_skills()
-    
-    # Search
-    if lower.startswith('search ') or lower.startswith('খোঁজো '):
-        query = text.split(' ', 1)[1]
-        return web_search(query)
-    
-    # Help
-    if lower in ['help', 'সাহায্য', '/help', '/start']:
-        return """🤖 **Sonorita AI Bot**
-
-**Commands:**
-• Just chat — AI will respond
-• `research [topic]` — Deep research
-• `search [query]` — Web search
-• `doc [type] [topic]` — Generate documents
-• `10 minute pore reminder dao` — Set reminder
-• `skills` — List installed skills
-• `skill add [name]` — Add a skill
-
-**Document Types:** report, essay, summary, letter, email, code, plan
-
-**Supported Languages:** বাংলা + English
-
-**API Providers:** OpenRouter → Groq → OpenAI → Gemini → HuggingFace (auto-fallback)"""
-    
-    # Default: AI chat
-    return None  # Will be handled by AI
-
-# ═══════════════════════════════════════════
-# TELEGRAM BOT (Webhook Mode)
-# ═══════════════════════════════════════════
-
+# ═══ FLASK APP ═══
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Sonorita AI Bot</title>
-        <style>
-            body { font-family: Arial; background: #0A0A0F; color: white; padding: 40px; text-align: center; }
-            h1 { color: #8B5CF6; }
-            .status { color: #4CAF50; }
-            .features { text-align: left; max-width: 600px; margin: 20px auto; }
-            .feature { padding: 10px; background: #151520; margin: 5px 0; border-radius: 8px; }
-        </style>
-    </head>
-    <body>
-        <h1>🤖 Sonorita AI Bot</h1>
-        <p class="status">✅ Bot is running!</p>
-        <div class="features">
-            <div class="feature">🧠 Multi-API AI (OpenRouter, Groq, OpenAI, Gemini, HuggingFace)</div>
-            <div class="feature">🔍 Deep Research & Web Search</div>
-            <div class="feature">⏰ Reminders (any time)</div>
-            <div class="feature">📝 Document Generation</div>
-            <div class="feature">🧩 Skills & Plugins</div>
-            <div class="feature">🌐 Bengali + English Support</div>
-        </div>
-        <p>Use the Telegram bot: <a href="https://t.me/YOUR_BOT_USERNAME" style="color: #06B6D4;">@SonoritaBot</a></p>
-    </body>
-    </html>
-    """)
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Handle Telegram webhook."""
-    data = request.get_json()
-    
-    if 'message' in data:
-        msg = data['message']
-        chat_id = msg['chat']['id']
-        user_id = msg['from']['id']
-        text = msg.get('text', '')
-        
-        if text:
-            # Handle command first
-            response = handle_command(text, user_id, chat_id)
-            
-            if response is None:
-                # Default: AI chat
-                response = call_ai(text, user_id=user_id)
-            
-            # Send response
-            send_message(chat_id, response)
-    
-    return jsonify({"ok": True})
-
-@app.route('/chat', methods=['POST'])
-def web_chat():
-    """Web interface chat endpoint."""
-    data = request.get_json()
-    text = data.get('message', '')
-    user_id = data.get('user_id', 'web_user')
-    
-    response = handle_command(text, user_id, 0)
-    if response is None:
-        response = call_ai(text, user_id=user_id)
-    
-    return jsonify({"response": response})
-
-@app.route('/check-reminders', methods=['GET', 'POST'])
-def check_reminders_endpoint():
-    """Cron endpoint to check reminders."""
-    bot_url = f"https://api.telegram.org/bot{BOT_TOKEN}"
-    check_reminders(bot_url)
-    return jsonify({"status": "checked"})
+    return jsonify({"status":"running","bot":"Sonorita AI","features":["chat","research","reminders","multi-api"]})
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "healthy", "timestamp": time.time()})
+    return jsonify({"ok":True,"ts":time.time()})
 
-def send_message(chat_id, text):
-    """Send message to Telegram."""
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    
-    # Split long messages
-    if len(text) > 4096:
-        chunks = [text[i:i+4096] for i in range(0, len(text), 4096)]
-        for chunk in chunks:
-            requests.post(url, json={
-                "chat_id": chat_id,
-                "text": chunk,
-                "parse_mode": "Markdown"
-            }, timeout=10)
-    else:
-        requests.post(url, json={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown"
-        }, timeout=10)
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    data = request.get_json()
+    if 'message' in data:
+        msg = data['message']
+        cid, uid, text = msg['chat']['id'], msg['from']['id'], msg.get('text','')
+        if text:
+            resp = handle(text, uid, cid) or call_ai(text, uid)
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",json={"chat_id":cid,"text":resp[:4096]},timeout=10)
+    return jsonify({"ok":True})
 
-def set_webhook():
-    """Set Telegram webhook."""
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
-    webhook_url = f"{WEBHOOK_URL}/webhook" if WEBHOOK_URL else ""
-    if webhook_url:
-        resp = requests.post(url, json={"url": webhook_url})
-        print(f"Webhook set: {resp.json()}")
+@app.route('/check-reminders', methods=['GET','POST'])
+def check_rems():
+    check_reminders()
+    return jsonify({"checked":True})
 
-# ═══════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════
-
+# ═══ START ═══
 if __name__ == '__main__':
-    print("🤖 Sonorita AI Bot starting...")
-    print(f"📡 Port: {os.environ.get("PORT", "10000")}")
-    print(f"🔗 Bot Token: {BOT_TOKEN[:10]}...")
-    
-    # Set webhook on start
-    set_webhook()
-    
-
-# Set webhook on start (for gunicorn)
-import threading
-def _auto_setup():
-    try:
-        set_webhook()
-        print("🤖 Sonorita Bot started via gunicorn!")
-    except Exception as e:
-        print(f"Webhook setup error: {e}")
-
-threading.Thread(target=_auto_setup, daemon=True).start()
+    port = int(os.environ.get('PORT', 8080))
+    print(f"🤖 Sonorita Bot on port {port}")
+    # Set webhook
+    webhook_url = os.environ.get("WEBHOOK_URL","")
+    if webhook_url:
+        try:
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",json={"url":f"{webhook_url}/webhook"},timeout=10)
+            print(f"✅ Webhook set: {webhook_url}/webhook")
+        except Exception as e:
+            print(f"Webhook error: {e}")
+    app.run(host='0.0.0.0', port=port)

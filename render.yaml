@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:8080 --workers 1 --timeout 120
+    startCommand: python app.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         value: 8652318426:AAHug3Gjns1JMRDMQ9hg6VHQsMBMbKVbwDk

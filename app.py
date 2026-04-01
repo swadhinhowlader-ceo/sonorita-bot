@@ -175,3 +175,16 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"Webhook error: {e}")
     app.run(host='0.0.0.0', port=port)
+
+@app.route('/debug')
+def debug():
+    import os
+    return jsonify({
+        "has_token": bool(os.environ.get("TELEGRAM_BOT_TOKEN")),
+        "has_openrouter": bool(os.environ.get("OPENROUTER_KEY_1")),
+        "has_groq": bool(os.environ.get("GROQ_KEY_1")),
+        "has_openai": bool(os.environ.get("OPENAI_KEY")),
+        "has_gemini": bool(os.environ.get("GEMINI_KEY")),
+        "port": os.environ.get("PORT"),
+        "webhook_url": os.environ.get("WEBHOOK_URL"),
+    })

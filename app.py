@@ -1,185 +1,236 @@
 """
-Sonorita AI Telegram Bot - CLEAN VERSION
+Sonorita Telegram Bot - PRODUCTION VERSION
 """
-import os, json, time, sqlite3, requests, re
+import os, json, time, sqlite3, requests, re, sys
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8652318426:AAHug3Gjns1JMRDMQ9hg6VHQsMBMbKVbwDk")
+# ═══ CONFIG ═══
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8652318426:AAHug3Gjns1JMRDMQ9hg6VHQsMBMbKVbwDk")
+TG_API = f"https://api.telegram.org/bot{TOKEN}"
 
-API_KEYS = {
-    "openrouter": [os.environ.get(f"OPENROUTER_KEY_{i}", "") for i in range(1,5)],
-    "groq": [os.environ.get(f"GROQ_KEY_{i}", "") for i in range(1,5)],
-    "openai": [os.environ.get("OPENAI_KEY", "")],
-    "gemini": [os.environ.get("GEMINI_KEY", "")],
-    "huggingface": [os.environ.get("HUGGINGFACE_KEY", "")],
-}
+# Log config on start
+print(f"🤖 Bot starting...", flush=True)
+print(f"📡 Token set: {bool(TOKEN and len(TOKEN) > 10)}", flush=True)
+print(f"🔑 OPENROUTER_KEY_1: {'SET' if os.environ.get('OPENROUTER_KEY_1') else 'NOT SET'}", flush=True)
+print(f"🔑 GROQ_KEY_1: {'SET' if os.environ.get('GROQ_KEY_1') else 'NOT SET'}", flush=True)
+sys.stdout.flush()
 
-SYSTEM_PROMPT = "You are Sonorita, a helpful AI assistant. Reply in Bengali or English."
+# ═══ FLASK ═══
+app = Flask(__name__)
 
-DB = "sonorita.db"
+# ═══ DATABASE ═══
 def init_db():
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY, user_id INTEGER, role TEXT, content TEXT, ts REAL)")
-    c.execute("CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY, user_id INTEGER, message TEXT, remind_at REAL, chat_id INTEGER, is_sent INTEGER DEFAULT 0)")
-    conn.commit()
-    conn.close()
-def db(query, params=()):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute(query, params)
-    conn.commit()
-    r = c.fetchall()
-    conn.close()
-    return r
+    try:
+        conn = sqlite3.connect("bot.db")
+        c = conn.cursor()
+        c.execute("CREATE TABLE IF NOT EXISTS chat (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER, role TEXT, msg TEXT, ts REAL)")
+        c.execute("CREATE TABLE IF NOT EXISTS remind (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER, msg TEXT, at REAL, cid INTEGER, done INTEGER DEFAULT 0)")
+        conn.commit()
+        conn.close()
+        print("✅ DB initialized", flush=True)
+    except Exception as e:
+        print(f"❌ DB error: {e}", flush=True)
+
 init_db()
 
-def call_ai(prompt, user_id=None):
-    messages = [{"role":"system","content":SYSTEM_PROMPT}]
-    if user_id:
-        for role, content in reversed(db("SELECT role,content FROM conversations WHERE user_id=? ORDER BY ts DESC LIMIT 10",(user_id,))):
-            messages.append({"role":role,"content":content})
-    messages.append({"role":"user","content":prompt})
-    
-    providers = [
-        ("openrouter","https://openrouter.ai/api/v1/chat/completions","anthropic/claude-3.5-sonnet"),
-        ("groq","https://api.groq.com/openai/v1/chat/completions","llama3-70b-8192"),
-        ("openai","https://api.openai.com/v1/chat/completions","gpt-4o-mini"),
-    ]
-    for prov, url, model in providers:
-        keys = [k for k in API_KEYS[prov] if k]
-        for key in keys:
-            try:
-                body = json.dumps({"model":model,"messages":messages,"max_tokens":2048})
-                h = {"Authorization":f"Bearer {key}","Content-Type":"application/json"}
-                r = requests.post(url,headers=h,data=body,timeout=30)
-                r.raise_for_status()
-                resp = r.json()["choices"][0]["message"]["content"]
-                if user_id:
-                    db("INSERT INTO conversations (user_id,role,content,ts) VALUES (?,?,?,?)",(user_id,"user",prompt,time.time()))
-                    db("INSERT INTO conversations (user_id,role,content,ts) VALUES (?,?,?,?)",(user_id,"assistant",resp,time.time()))
-                return resp
-            except Exception as e:
-                print(f"[{prov}] Error: {e}")
-                continue
-    return "⚠️ API key missing! Set OPENROUTER_KEY_1 on Render."
-
-def send_tg(chat_id, text):
-    """Send message to Telegram with error logging."""
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+def sql(q, p=()):
     try:
-        r = requests.post(url, json={"chat_id": chat_id, "text": text[:4096]}, timeout=10)
-        print(f"[TG] Send to {chat_id}: {r.status_code} {r.text[:100]}")
+        conn = sqlite3.connect("bot.db")
+        c = conn.cursor()
+        c.execute(q, p)
+        conn.commit()
+        r = c.fetchall()
+        conn.close()
+        return r
+    except Exception as e:
+        print(f"SQL error: {e}", flush=True)
+        return []
+
+# ═══ SEND MESSAGE ═══
+def send_msg(cid, text):
+    """Send message to Telegram - always works."""
+    try:
+        r = requests.post(f"{TG_API}/sendMessage", json={
+            "chat_id": cid, 
+            "text": str(text)[:4096]
+        }, timeout=15)
+        print(f"[SEND] → {cid}: {r.status_code}", flush=True)
         return r.ok
     except Exception as e:
-        print(f"[TG] Send error: {e}")
+        print(f"[SEND] Error: {e}", flush=True)
         return False
 
-def parse_reminder(text):
-    patterns = [(r'(\d+)\s*(minute|min|মিনিট)','minutes'),(r'(\d+)\s*(hour|ghonta|ঘণ্টা)','hours')]
-    for pat, unit in patterns:
+# ═══ AI CALL ═══
+def ask_ai(prompt, uid=None):
+    """Call AI with fallback. Returns text or error message."""
+    msgs = [{"role": "system", "content": "You are Sonorita, a helpful AI assistant. Reply in Bengali or English."}]
+    
+    # Add history
+    if uid:
+        for role, content in reversed(sql("SELECT role,msg FROM chat WHERE uid=? ORDER BY ts DESC LIMIT 10", (uid,))):
+            msgs.append({"role": role, "content": content})
+    msgs.append({"role": "user", "content": prompt})
+    
+    # Try providers
+    providers = [
+        ("openrouter", "https://openrouter.ai/api/v1/chat/completions", "meta-llama/llama-3.1-8b-instruct:free"),
+        ("groq", "https://api.groq.com/openai/v1/chat/completions", "llama3-8b-8192"),
+        ("openai", "https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
+    ]
+    
+    for name, url, model in providers:
+        key = os.environ.get(f"{name.upper()}_KEY_1") or os.environ.get(f"{name.upper()}_KEY")
+        if not key:
+            continue
+        try:
+            body = json.dumps({"model": model, "messages": msgs, "max_tokens": 2048})
+            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            r = requests.post(url, headers=headers, data=body, timeout=30)
+            if r.ok:
+                resp = r.json()["choices"][0]["message"]["content"]
+                # Save to history
+                if uid:
+                    sql("INSERT INTO chat (uid,role,msg,ts) VALUES (?,?,?,?)", (uid, "user", prompt, time.time()))
+                    sql("INSERT INTO chat (uid,role,msg,ts) VALUES (?,?,?,?)", (uid, "assistant", resp, time.time()))
+                print(f"[AI] {name} success!", flush=True)
+                return resp
+            else:
+                print(f"[AI] {name} failed: {r.status_code}", flush=True)
+        except Exception as e:
+            print(f"[AI] {name} error: {e}", flush=True)
+            continue
+    
+    return "⚠️ No AI API key found! Add OPENROUTER_KEY_1 on Render dashboard."
+
+# ═══ REMINDER ═══
+def parse_time(text):
+    for pat, unit in [(r'(\d+)\s*(?:minute|min|মিনিট)', 'minutes'), (r'(\d+)\s*(?:hour|ghonta|ঘণ্টা)', 'hours')]:
         m = re.search(pat, text, re.I)
         if m:
             n = int(m.group(1))
-            msg = re.sub(pat,'',text,flags=re.I)
-            msg = re.sub(r'remind|reminder|dao|dibo','',msg,flags=re.I).strip() or f"{n} {unit} reminder"
-            d = timedelta(**{unit:n})
-            return {"time":datetime.now()+d,"message":msg,"amount":n,"unit":unit}
+            clean = re.sub(pat, '', text, flags=re.I)
+            clean = re.sub(r'remind|reminder|dao|dibo|মনে|করিয়ে', '', clean, flags=re.I).strip()
+            if not clean:
+                clean = f"{n} {unit} reminder"
+            return {"at": datetime.now() + timedelta(**{unit: n}), "msg": clean, "n": n, "unit": unit}
     return None
 
-app = Flask(__name__)
+# ═══ ROUTES ═══
+@app.route("/")
+def index():
+    return jsonify({"status": "ok", "bot": "Sonorita AI"})
 
-@app.route('/')
-def home():
-    return jsonify({"status":"running","bot":"Sonorita AI"})
-
-@app.route('/health')
+@app.route("/health")
 def health():
-    return jsonify({"ok":True})
+    return jsonify({"ok": True, "ts": time.time()})
 
-@app.route('/webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        data = request.get_json()
-        print(f"[WEBHOOK] Received: {json.dumps(data)[:200]}")
+        data = request.get_json(force=True)
         
-        if 'message' in data:
-            msg = data['message']
-            cid = msg['chat']['id']
-            uid = msg['from']['id']
-            text = msg.get('text', '')
-            
-            print(f"[WEBHOOK] From {uid}: {text}")
-            
-            if text:
-                # Handle commands
-                low = text.lower().strip()
-                
-                if low in ['/start', 'start', 'help', '/help']:
-                    resp = "🤖 Sonorita Bot Active!\n\nCommands:\n• Just chat = AI responds\n• research [topic] = deep research\n• 10 minute pore reminder dao = set reminder"
-                    send_tg(cid, resp)
-                    return jsonify({"ok":True})
-                
-                # Reminder
-                if any(w in low for w in ['remind','reminder','মিনিট পর']):
-                    p = parse_reminder(text)
-                    if p:
-                        db("INSERT INTO reminders (user_id,message,remind_at,chat_id) VALUES (?,?,?,?)",(uid,p["message"],p["time"].timestamp(),cid))
-                        send_tg(cid, f"⏰ {p['amount']} {p['unit']} pore reminder!")
-                    else:
-                        send_tg(cid, "⏰ Format: '10 minute pore reminder dao'")
-                    return jsonify({"ok":True})
-                
-                # Research
-                if low.startswith('research ') or low.startswith('search '):
-                    q = text.split(' ',1)[1]
-                    try:
-                        r = requests.get(f"https://api.duckduckgo.com/?q={q}&format=json",timeout=10).json()
-                        results = [r.get("Abstract","")] + [t.get("Text","") for t in r.get("RelatedTopics",[])[:3] if isinstance(t,dict)]
-                        search_text = "\n".join([x for x in results if x])[:1000]
-                        resp = call_ai(f"Research on '{q}':\n{search_text}\nSummarize.", uid)
-                    except:
-                        resp = "Search error."
-                    send_tg(cid, resp)
-                    return jsonify({"ok":True})
-                
-                # AI Chat
-                resp = call_ai(text, uid)
-                print(f"[WEBHOOK] AI response: {resp[:100]}")
-                send_tg(cid, resp)
+        if not data or "message" not in data:
+            return jsonify({"ok": True})
         
-        return jsonify({"ok":True})
+        msg = data["message"]
+        cid = msg["chat"]["id"]
+        uid = msg["from"]["id"]
+        text = msg.get("text", "")
+        
+        if not text:
+            send_msg(cid, "🤖 I can only read text messages.")
+            return jsonify({"ok": True})
+        
+        print(f"[MSG] User {uid}: {text}", flush=True)
+        low = text.lower().strip()
+        
+        # /start or help
+        if low in ["/start", "start", "hi", "hello", "হ্যালো", "/help", "help"]:
+            send_msg(cid, "🤖 Sonorita Bot Active!\n\n"
+                "Just type anything = AI chat\n"
+                "research [topic] = web research\n"
+                "10 minute pore reminder dao = set reminder")
+            return jsonify({"ok": True})
+        
+        # Reminder
+        if "remind" in low or "মিনিট পর" in low or "মনে করিয়ে" in low:
+            p = parse_time(text)
+            if p:
+                sql("INSERT INTO remind (uid,msg,at,cid) VALUES (?,?,?,?)", (uid, p["msg"], p["at"].timestamp(), cid))
+                send_msg(cid, f"⏰ Reminder set! {p['n']} {p['unit']} pore: \"{p['msg']}\"")
+            else:
+                send_msg(cid, "⏰ Example: '10 minute pore reminder dao'")
+            return jsonify({"ok": True})
+        
+        # Research
+        if low.startswith("research ") or low.startswith("search "):
+            q = text.split(" ", 1)[1] if " " in text else text
+            try:
+                sr = requests.get(f"https://api.duckduckgo.com/?q={q}&format=json&no_html=1", timeout=10).json()
+                results = []
+                if sr.get("Abstract"):
+                    results.append(sr["Abstract"])
+                for t in sr.get("RelatedTopics", [])[:3]:
+                    if isinstance(t, dict) and t.get("Text"):
+                        results.append(t["Text"])
+                search_data = "\n".join(results)[:1500]
+                if search_data:
+                    resp = ask_ai(f"Research: {q}\n\n{search_data}\n\nSummarize.", uid)
+                else:
+                    resp = ask_ai(f"Research and explain: {q}", uid)
+            except:
+                resp = ask_ai(f"Research and explain: {q}", uid)
+            send_msg(cid, resp)
+            return jsonify({"ok": True})
+        
+        # Default: AI chat
+        resp = ask_ai(text, uid)
+        send_msg(cid, resp)
+        
+        return jsonify({"ok": True})
+        
     except Exception as e:
-        print(f"[WEBHOOK] Error: {e}")
+        print(f"[WEBHOOK] Error: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/check-reminders')
-def check_rems():
+@app.route("/check-reminders")
+def check_reminders():
     now = time.time()
-    for rid, uid, msg, cid in db("SELECT id,user_id,message,chat_id FROM reminders WHERE remind_at<=? AND is_sent=0",(now,)):
-        try:
-            send_tg(cid, f"⏰ REMINDER: {msg}")
-            db("UPDATE reminders SET is_sent=1 WHERE id=?",(rid,))
-        except: pass
-    return jsonify({"checked":True})
+    for rid, uid, msg, cid in sql("SELECT id,uid,msg,cid FROM remind WHERE at<=? AND done=0", (now,)):
+        send_msg(cid, f"⏰ REMINDER: {msg}")
+        sql("UPDATE remind SET done=1 WHERE id=?", (rid,))
+    return jsonify({"checked": True})
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))
-    print(f"🤖 Sonorita Bot starting on port {port}")
-    webhook_url = os.environ.get("WEBHOOK_URL","")
-    if webhook_url:
-        try:
-            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",json={"url":f"{webhook_url}/webhook"},timeout=10)
-            print(f"✅ Webhook: {webhook_url}/webhook")
-        except: pass
-    # Self-ping
+# ═══ START ═══
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    print(f"🚀 Running on port {port}", flush=True)
+    
+    # Set webhook
+    try:
+        r = requests.get(f"{TG_API}/getWebhookInfo", timeout=10)
+        info = r.json().get("result", {})
+        current_url = info.get("url", "")
+        target_url = "https://sonorita-bot.onrender.com/webhook"
+        
+        if current_url != target_url:
+            requests.get(f"{TG_API}/setWebhook?url={target_url}", timeout=10)
+            print(f"✅ Webhook set: {target_url}", flush=True)
+        else:
+            print(f"✅ Webhook already set: {current_url}", flush=True)
+    except Exception as e:
+        print(f"Webhook error: {e}", flush=True)
+    
+    # Keep-alive ping
     import threading
-    def ping():
+    def keep_alive():
         while True:
             time.sleep(600)
-            try: requests.get(f"https://sonorita-bot.onrender.com/health",timeout=10)
-            except: pass
-    threading.Thread(target=ping,daemon=True).start()
+            try:
+                requests.get("https://sonorita-bot.onrender.com/health", timeout=10)
+            except:
+                pass
+    threading.Thread(target=keep_alive, daemon=True).start()
     
-    app.run(host='0.0.0.0', port=port)
+    app.run(host="0.0.0.0", port=port)

@@ -1,4 +1,6 @@
 """
+from dotenv import load_dotenv
+load_dotenv()
 Sonorita AI Telegram Bot - CLEAN VERSION
 Multi-API fallback: OpenRouter → Groq → OpenAI → Gemini → HuggingFace
 """

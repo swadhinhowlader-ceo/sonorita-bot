@@ -579,7 +579,7 @@ def set_webhook():
 
 if __name__ == '__main__':
     print("🤖 Sonorita AI Bot starting...")
-    print(f"📡 Port: 8080")
+    print(f"📡 Port: {os.environ.get("PORT", "10000")}")
     print(f"🔗 Bot Token: {BOT_TOKEN[:10]}...")
     
     # Set webhook on start

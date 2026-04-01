@@ -585,6 +585,14 @@ if __name__ == '__main__':
     # Set webhook on start
     set_webhook()
     
-    # Run Flask app
-    port = int(os.environ.get('PORT', '10000'))
-    app.run(host='0.0.0.0', port=port, debug=False)
+
+# Set webhook on start (for gunicorn)
+import threading
+def _auto_setup():
+    try:
+        set_webhook()
+        print("🤖 Sonorita Bot started via gunicorn!")
+    except Exception as e:
+        print(f"Webhook setup error: {e}")
+
+threading.Thread(target=_auto_setup, daemon=True).start()
